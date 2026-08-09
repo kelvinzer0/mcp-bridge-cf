@@ -1,25 +1,52 @@
 import { DurableObject } from "cloudflare:workers"
 
 export class MCPBridge extends DurableObject {
+  // In-memory state (lost on DO cold start/hibernation)
   private tools = new Map<string, any>()
   private extensionWs: WebSocket | null = null
   private extensionConnected = false
   private pendingCalls = new Map<string, { resolve: Function; reject: Function; timer: any }>()
+  private stateRestored = false
+
+  // ── Restore persisted state on wake ──
+  private async restoreState(): Promise<void> {
+    if (this.stateRestored) return
+    this.stateRestored = true
+    try {
+      const stored = await this.ctx.storage.get<Record<string, any>>("tools")
+      if (stored) {
+        for (const [k, v] of Object.entries(stored)) this.tools.set(k, v)
+      }
+      // Recheck actual WS state using hibernation API
+      const sockets = this.ctx.getWebSockets()
+      if (sockets.length > 0) {
+        this.extensionWs = sockets[0]
+        this.extensionConnected = true
+      } else {
+        this.extensionConnected = false
+        this.extensionWs = null
+      }
+    } catch {}
+  }
 
   async fetch(request: Request): Promise<Response> {
+    await this.restoreState()
     const url = new URL(request.url)
 
     // Health
     if (url.pathname === "/health" || url.pathname.endsWith("/health")) {
+      // Always check real WS count from hibernation API
+      const sockets = this.ctx.getWebSockets()
+      const isConnected = sockets.length > 0
       return Response.json({
         status: "ok",
-        extensionConnected: this.extensionConnected,
+        extensionConnected: isConnected,
         toolsRegistered: this.tools.size,
         tools: Array.from(this.tools.keys()),
       })
     }
 
-    // WebSocket
+    // WebSocket upgrade for extension
     if (url.pathname === "/ws/extension" || url.pathname.endsWith("/ws/extension")) {
       const upgrade = request.headers.get("Upgrade")
       if (upgrade !== "websocket") return new Response("Expected websocket", { status: 426 })
@@ -28,7 +55,7 @@ export class MCPBridge extends DurableObject {
       const client = pair[0]
       const server = pair[1]
 
-      // Hibernation API
+      // Hibernation API — survives DO sleep cycles
       this.ctx.acceptWebSocket(server)
 
       this.extensionWs = server
@@ -37,7 +64,7 @@ export class MCPBridge extends DurableObject {
       return new Response(null, { status: 101, webSocket: client })
     }
 
-    // MCP
+    // MCP endpoint
     if (url.pathname === "/mcp" || url.pathname.endsWith("/mcp")) {
       if (request.method === "GET") return this.sse()
       if (request.method === "POST") return await this.rpc(request)
@@ -49,13 +76,17 @@ export class MCPBridge extends DurableObject {
 
   // Hibernation callbacks
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
+    await this.restoreState()
     try {
       const text = typeof message === "string" ? message : new TextDecoder().decode(message)
       const msg = JSON.parse(text)
       if (msg.type === "registerTools") {
         for (const t of msg.tools) this.tools.set(t.name, t)
+        // Persist tools to storage so they survive DO hibernation
+        await this.ctx.storage.put("tools", Object.fromEntries(this.tools))
       } else if (msg.type === "unregisterTools") {
         for (const n of msg.names) this.tools.delete(n)
+        await this.ctx.storage.put("tools", Object.fromEntries(this.tools))
       } else if (msg.type === "toolResult") {
         const p = this.pendingCalls.get(msg.callId)
         if (p) { clearTimeout(p.timer); this.pendingCalls.delete(msg.callId); p.resolve(msg.result) }
@@ -64,16 +95,16 @@ export class MCPBridge extends DurableObject {
   }
 
   async webSocketClose(): Promise<void> {
-    console.log('[MCPBridge] webSocketClose called!')
-    this.extensionWs = null
     this.extensionConnected = false
+    this.extensionWs = null
+    // Clear persisted tools — extension disconnected
     this.tools.clear()
-    for (const [, p] of this.pendingCalls) { clearTimeout(p.timer); p.reject(new Error("Disconnected")) }
+    await this.ctx.storage.delete("tools")
+    for (const [, p] of this.pendingCalls) { clearTimeout(p.timer); p.reject(new Error("Extension disconnected")) }
     this.pendingCalls.clear()
   }
 
   async webSocketError(): Promise<void> {
-    console.log('[MCPBridge] webSocketError called!')
     await this.webSocketClose()
   }
 
@@ -82,11 +113,10 @@ export class MCPBridge extends DurableObject {
     const w = writable.getWriter()
     const e = new TextEncoder()
 
-    // Send the required MCP-over-SSE 'endpoint' event immediately on connect.
-    // MCP clients wait for this before they start sending POST requests.
+    // MCP-over-SSE: send 'endpoint' event immediately so clients know where to POST
     w.write(e.encode(`event: endpoint\ndata: /mcp\n\n`)).catch(() => {})
 
-    // Heartbeat every 30s to keep the connection alive through proxies/CF
+    // Heartbeat every 30s to keep connection alive through proxies/CF
     const hb = setInterval(() => w.write(e.encode(":\n\n")).catch(() => clearInterval(hb)), 30000)
     return new Response(new ReadableStream({
       start(c) { const r = readable.getReader(); const p = (): Promise<void> => r.read().then(({ done, value }) => { if (done) { c.close(); return } c.enqueue(value); return p() }); p().catch(() => c.close()) },
@@ -95,11 +125,16 @@ export class MCPBridge extends DurableObject {
   }
 
   private async rpc(request: Request): Promise<Response> {
+    await this.restoreState()
     let body: any
     try { body = await request.json() } catch {
       return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, { status: 400 })
     }
     if (body.id === undefined) return new Response(null, { status: 202 })
+
+    // Get actual live WebSocket from hibernation API
+    const sockets = this.ctx.getWebSockets()
+    const activeWs = sockets.length > 0 ? sockets[0] : null
 
     let resp: any
     switch (body.method) {
@@ -113,13 +148,13 @@ export class MCPBridge extends DurableObject {
         const name = body.params?.name
         const args = body.params?.arguments || {}
         if (!name || !this.tools.has(name)) { resp = { jsonrpc: "2.0", id: body.id, error: { code: -32602, message: `Unknown tool: ${name}` } }; break }
-        if (!this.extensionWs) { resp = { jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "Not connected" }], isError: true } }; break }
+        if (!activeWs) { resp = { jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "Extension not connected" }], isError: true } }; break }
         try {
           const result = await new Promise((resolve, reject) => {
             const callId = crypto.randomUUID()
             const timer = setTimeout(() => { this.pendingCalls.delete(callId); reject(new Error(`Timeout: ${name}`)) }, 60000)
             this.pendingCalls.set(callId, { resolve, reject, timer })
-            this.extensionWs!.send(JSON.stringify({ type: "callTool", callId, name, params: args }))
+            activeWs.send(JSON.stringify({ type: "callTool", callId, name, params: args }))
           })
           resp = { jsonrpc: "2.0", id: body.id, result }
         } catch (err) {
