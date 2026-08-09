@@ -31,8 +31,8 @@ export default {
       })
     }
 
-    // Generate new room
-    if (url.pathname === "/new" || url.pathname.endsWith("/new")) {
+    // Generate new room (supports both /new and /mcp/new)
+    if (url.pathname === "/new" || url.pathname === "/mcp/new") {
       const roomId = crypto.randomUUID().slice(0, 8)
       const base = url.origin
       return Response.json({
