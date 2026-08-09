@@ -1,3 +1,8 @@
+// Dummy DO class (not used, but required for migration)
+export class MCPBridge {
+  async fetch() { return new Response('Not used') }
+}
+
 export default {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
