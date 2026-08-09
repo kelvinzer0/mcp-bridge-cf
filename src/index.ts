@@ -1,13 +1,6 @@
 /**
- * MCP Bridge — Cloudflare Worker entry point
- *
- * Multi-room: setiap room = 1 Durable Object instance
- *
- * Routes:
- *   /ws/extension?room=<id>  — WebSocket for tool provider
- *   /mcp?room=<id>           — Streamable HTTP for MCP client
- *   /health                  — Health check
- *   /new                     — Generate new room URL
+ * MCP Bridge — Cloudflare Worker
+ * No Durable Objects — pure Worker WebSocket + in-memory state
  */
 
 export { MCPBridge } from "./bridge"
@@ -31,11 +24,11 @@ export default {
       })
     }
 
-    // Generate new room (supports both /new and /mcp/new)
+    // Generate new room
     if (url.pathname === "/new" || url.pathname === "/mcp/new") {
       const roomId = crypto.randomUUID().slice(0, 8)
       const base = url.origin
-      const wsBase = base.replace('https://', 'wss://').replace('http://', 'ws://')
+      const wsBase = base.replace("https://", "wss://").replace("http://", "ws://")
       return Response.json({
         room: roomId,
         extension_url: `${wsBase}/ws/extension?room=${roomId}`,
@@ -44,29 +37,30 @@ export default {
       })
     }
 
-    // Get room from query or path
+    // Route to Durable Object for everything else
     const room = url.searchParams.get("room") || extractRoomFromPath(url.pathname) || "default"
 
-    // Route to Durable Object
-    const id = env.MCP_BRIDGE.idFromName(room)
-    const stub = env.MCP_BRIDGE.get(id)
+    try {
+      const id = env.MCP_BRIDGE.idFromName(room)
+      const stub = env.MCP_BRIDGE.get(id)
 
-    const response = await stub.fetch(request)
+      const response = await stub.fetch(request)
 
-    // CORS headers
-    const headers = new Headers(response.headers)
-    headers.set("Access-Control-Allow-Origin", "*")
+      const headers = new Headers(response.headers)
+      headers.set("Access-Control-Allow-Origin", "*")
 
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers,
-    })
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      })
+    } catch (err) {
+      return Response.json({ error: String(err) }, { status: 500 })
+    }
   },
 }
 
 function extractRoomFromPath(pathname: string): string | null {
-  // /room/<id>/... pattern
   const match = pathname.match(/^\/room\/([^/]+)/)
   return match ? match[1] : null
 }

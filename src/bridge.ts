@@ -5,47 +5,47 @@ export class MCPBridge extends DurableObject {
   private extensionWs: WebSocket | null = null
   private extensionConnected = false
   private pendingCalls = new Map<string, any>()
-  private sseWriters = new Map<string, WritableStreamDefaultWriter>()
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
 
-    if (url.pathname === "/health" || url.pathname.endsWith("/health")) {
-      return Response.json({
-        status: "ok",
-        extensionConnected: this.extensionConnected,
-        toolsRegistered: this.tools.size,
-        tools: Array.from(this.tools.keys()),
-      })
-    }
-
-    if (url.pathname === "/ws/extension" || url.pathname.endsWith("/ws/extension")) {
-      const upgrade = request.headers.get("Upgrade")
-      if (upgrade !== "websocket") {
-        return new Response("Expected websocket", { status: 426 })
+    try {
+      if (url.pathname === "/health" || url.pathname.endsWith("/health")) {
+        return Response.json({
+          status: "ok",
+          extensionConnected: this.extensionConnected,
+          toolsRegistered: this.tools.size,
+          tools: Array.from(this.tools.keys()),
+        })
       }
 
-      const pair = new WebSocketPair()
-      const client = pair[0]
-      const server = pair[1]
+      if (url.pathname === "/ws/extension" || url.pathname.endsWith("/ws/extension")) {
+        const upgrade = request.headers.get("Upgrade")
+        if (upgrade !== "websocket") {
+          return new Response("Expected websocket", { status: 426 })
+        }
 
-      // Use ONLY acceptWebSocket — do NOT use addEventListener
-      this.ctx.acceptWebSocket(server)
+        const pair = new WebSocketPair()
+        const client = pair[0]
+        const server = pair[1]
 
-      this.extensionWs = server
-      this.extensionConnected = true
+        this.ctx.acceptWebSocket(server)
 
-      return new Response(null, { status: 101, webSocket: client })
+        this.extensionWs = server
+        this.extensionConnected = true
+
+        return new Response(null, { status: 101, webSocket: client })
+      }
+
+      if (url.pathname === "/mcp" || url.pathname.endsWith("/mcp")) {
+        return await this.handleMcp(request)
+      }
+
+      return new Response("Not Found", { status: 404 })
+    } catch (err) {
+      return Response.json({ error: String(err), stack: (err as Error).stack }, { status: 500 })
     }
-
-    if (url.pathname === "/mcp" || url.pathname.endsWith("/mcp")) {
-      return this.handleMcp(request)
-    }
-
-    return new Response("Not Found", { status: 404 })
   }
-
-  // ─── Hibernation API callbacks ONLY ───
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
     try {
@@ -63,39 +63,28 @@ export class MCPBridge extends DurableObject {
           this.pendingCalls.delete(msg.callId)
           pending.resolve(msg.result)
         }
-      } else if (msg.type === "pong") {
-        // ignore
       }
     } catch (err) {
       console.error("Bad message:", err)
     }
   }
 
-  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+  async webSocketClose(): Promise<void> {
     this.extensionWs = null
     this.extensionConnected = false
     this.tools.clear()
-    for (const [, pending] of this.pendingCalls) {
-      clearTimeout(pending.timer)
-      pending.reject(new Error("Disconnected"))
-    }
-    this.pendingCalls.clear()
   }
 
-  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+  async webSocketError(): Promise<void> {
     this.extensionWs = null
     this.extensionConnected = false
   }
 
-  // ─── MCP Protocol ───
-
-  private handleMcp(request: Request): Response | Promise<Response> {
+  private async handleMcp(request: Request): Promise<Response> {
     if (request.method === "GET") {
-      const id = crypto.randomUUID()
       const { readable, writable } = new TransformStream<Uint8Array>()
       const writer = writable.getWriter()
       const enc = new TextEncoder()
-      this.sseWriters.set(id, writer)
       const hb = setInterval(() => writer.write(enc.encode(":\n\n")).catch(() => clearInterval(hb)), 30000)
       const stream = new ReadableStream({
         start(c) {
@@ -114,14 +103,6 @@ export class MCPBridge extends DurableObject {
       })
     }
 
-    if (request.method === "POST") {
-      return this.handleJsonRpc(request)
-    }
-
-    return new Response("Method Not Allowed", { status: 405 })
-  }
-
-  private async handleJsonRpc(request: Request): Promise<Response> {
     let body: any
     try { body = await request.json() } catch {
       return Response.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, { status: 400 })
@@ -129,32 +110,26 @@ export class MCPBridge extends DurableObject {
 
     if (body.id === undefined) return new Response(null, { status: 202 })
 
-    const resp = await this.dispatch(body)
-    return Response.json(resp)
-  }
-
-  private async dispatch(req: any): Promise<any> {
-    switch (req.method) {
+    switch (body.method) {
       case "initialize":
-        return { jsonrpc: "2.0", id: req.id, result: { protocolVersion: "2025-03-26", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "mcp-bridge", version: "0.1.0" } } }
+        return Response.json({ jsonrpc: "2.0", id: body.id, result: { protocolVersion: "2025-03-26", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "mcp-bridge", version: "0.1.0" } } })
       case "tools/list":
-        return { jsonrpc: "2.0", id: req.id, result: { tools: Array.from(this.tools.values()).map((t: any) => ({ name: t.name, description: t.description || "", inputSchema: t.inputSchema || { type: "object", properties: {} } })) } }
+        return Response.json({ jsonrpc: "2.0", id: body.id, result: { tools: Array.from(this.tools.values()).map((t: any) => ({ name: t.name, description: t.description || "", inputSchema: t.inputSchema || { type: "object", properties: {} } })) } })
       case "tools/call": {
-        const name = req.params?.name
-        const args = req.params?.arguments || {}
-        if (!name || !this.tools.has(name)) return { jsonrpc: "2.0", id: req.id, error: { code: -32602, message: `Unknown tool: ${name}` } }
-        if (!this.extensionWs) return { jsonrpc: "2.0", id: req.id, result: { content: [{ type: "text", text: "Tool provider not connected" }], isError: true } }
+        const name = body.params?.name
+        if (!name || !this.tools.has(name)) return Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32602, message: `Unknown tool: ${name}` } })
+        if (!this.extensionWs) return Response.json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "Not connected" }], isError: true } })
         try {
-          const result = await this.callTool(name, args)
-          return { jsonrpc: "2.0", id: req.id, result }
+          const result = await this.callTool(name, body.params?.arguments || {})
+          return Response.json({ jsonrpc: "2.0", id: body.id, result })
         } catch (err) {
-          return { jsonrpc: "2.0", id: req.id, result: { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true } }
+          return Response.json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true } })
         }
       }
       case "ping":
-        return { jsonrpc: "2.0", id: req.id, result: {} }
+        return Response.json({ jsonrpc: "2.0", id: body.id, result: {} })
       default:
-        return { jsonrpc: "2.0", id: req.id, error: { code: -32601, message: `Method not found: ${req.method}` } }
+        return Response.json({ jsonrpc: "2.0", id: body.id, error: { code: -32601, message: `Method not found: ${body.method}` } })
     }
   }
 
