@@ -64,6 +64,7 @@ export class MCPBridge extends DurableObject {
   }
 
   async webSocketClose(): Promise<void> {
+    console.log('[MCPBridge] webSocketClose called!')
     this.extensionWs = null
     this.extensionConnected = false
     this.tools.clear()
@@ -72,6 +73,7 @@ export class MCPBridge extends DurableObject {
   }
 
   async webSocketError(): Promise<void> {
+    console.log('[MCPBridge] webSocketError called!')
     await this.webSocketClose()
   }
 
