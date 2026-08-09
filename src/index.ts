@@ -128,7 +128,7 @@ export default {
       }
 
       // Return DO response directly (don't rebuild — preserves status 101 if needed)
-      return response
+      return stub.fetch(modifiedRequest)
     } catch (err) {
       return Response.json({ error: String(err) }, { status: 500 })
     }
