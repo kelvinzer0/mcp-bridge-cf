@@ -35,9 +35,10 @@ export default {
     if (url.pathname === "/new" || url.pathname === "/mcp/new") {
       const roomId = crypto.randomUUID().slice(0, 8)
       const base = url.origin
+      const wsBase = base.replace('https://', 'wss://').replace('http://', 'ws://')
       return Response.json({
         room: roomId,
-        extension_url: `${base}/ws/extension?room=${roomId}`,
+        extension_url: `${wsBase}/ws/extension?room=${roomId}`,
         mcp_url: `${base}/mcp?room=${roomId}`,
         health_url: `${base}/health?room=${roomId}`,
       })
