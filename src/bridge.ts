@@ -30,7 +30,7 @@ interface PendingCall {
 /**
  * MCP Bridge Durable Object
  *
- * Bridges tool providers (WebSocket) with MCP clients (Streamable HTTP).
+ * Uses WebSocket Hibernation API for persistent connections.
  */
 export class MCPBridge extends DurableObject {
   private session: StoredSession = {
@@ -46,8 +46,26 @@ export class MCPBridge extends DurableObject {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
 
+    // WebSocket upgrade for extension
     if (url.pathname === "/ws/extension" || url.pathname.endsWith("/ws/extension")) {
-      return this.handleWsUpgrade(request)
+      const upgrade = request.headers.get("Upgrade")
+      if (upgrade !== "websocket") {
+        return new Response("Expected WebSocket upgrade", { status: 426 })
+      }
+
+      // Use Hibernation API - acceptWebSocket handles the upgrade
+      const pair = new WebSocketPair()
+      const [client, server] = [pair[0], pair[1]]
+
+      // Accept the WebSocket (this is the hibernation API)
+      this.ctx.acceptWebSocket(server)
+
+      // Store reference
+      this.extensionWs = server
+      this.session.extensionConnected = true
+
+      // Return client side with 101 status
+      return new Response(null, { status: 101, webSocket: client })
     }
 
     if (url.pathname === "/mcp" || url.pathname.endsWith("/mcp")) {
@@ -69,52 +87,35 @@ export class MCPBridge extends DurableObject {
   }
 
   // ============================================================
-  //  WEBSOCKET UPGRADE
+  //  WEBSOCKET HANDLERS (Hibernation API callbacks)
   // ============================================================
 
-  private handleWsUpgrade(request: Request): Response {
-    const upgrade = request.headers.get("Upgrade")
-    if (upgrade !== "websocket") {
-      return new Response("Expected WebSocket upgrade", { status: 426 })
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    try {
+      const text = typeof message === "string" ? message : new TextDecoder().decode(message)
+      const msg = JSON.parse(text) as ExtensionMessage
+      this.onExtensionMessage(msg)
+    } catch (err) {
+      console.error("Bad extension message:", err)
     }
-
-    const pair = new WebSocketPair()
-    const [client, server] = [pair[0], pair[1]]
-
-    this.handleExtensionSocket(server)
-
-    return new Response(null, { status: 101, webSocket: client })
   }
 
-  private handleExtensionSocket(ws: WebSocket) {
-    if (this.extensionWs) {
-      try {
-        this.extensionWs.close(4000, "Replaced")
-      } catch {
-        // ignore
-      }
-    }
-
-    this.extensionWs = ws
-    this.session.extensionConnected = true
-    this.ctx.acceptWebSocket(ws)
-
-    ws.addEventListener("message", (event: MessageEvent) => {
-      try {
-        const msg = JSON.parse(event.data as string) as ExtensionMessage
-        this.onExtensionMessage(msg)
-      } catch (err) {
-        console.error("Bad extension message:", err)
-      }
-    })
-
-    ws.addEventListener("close", () => {
-      this.extensionWs = null
-      this.session.extensionConnected = false
-      this.clearDynamicTools()
-      this.rejectAllPending("Extension disconnected")
-    })
+  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+    this.extensionWs = null
+    this.session.extensionConnected = false
+    this.clearDynamicTools()
+    this.rejectAllPending("Extension disconnected")
   }
+
+  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+    console.error("WebSocket error:", error)
+    this.extensionWs = null
+    this.session.extensionConnected = false
+  }
+
+  // ============================================================
+  //  EXTENSION MESSAGE HANDLING
+  // ============================================================
 
   private onExtensionMessage(msg: ExtensionMessage) {
     switch (msg.type) {
@@ -170,22 +171,18 @@ export class MCPBridge extends DurableObject {
 
     this.sseWriters.set(streamId, writer)
 
-    // Heartbeat
     const heartbeat = setInterval(() => {
       writer.write(encoder.encode(":\n\n")).catch(() => clearInterval(heartbeat))
     }, 30000)
 
-    // Cleanup after response ends
     const cleanup = () => {
       clearInterval(heartbeat)
       this.sseWriters.delete(streamId)
       writer.close().catch(() => {})
     }
 
-    // Use a custom stream that cleans up
     const responseStream = new ReadableStream({
       start(controller) {
-        // Pipe from transform stream
         const reader = readable.getReader()
         const pump = (): Promise<void> =>
           reader.read().then(({ done, value }) => {
@@ -226,7 +223,6 @@ export class MCPBridge extends DurableObject {
       )
     }
 
-    // Notification (no id)
     if (body.id === undefined) {
       this.handleNotification(body as JsonRpcNotification)
       return new Response(null, { status: 202 })
