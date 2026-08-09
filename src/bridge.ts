@@ -1,18 +1,17 @@
 import { DurableObject } from "cloudflare:workers"
 
-/**
- * MCP Bridge Durable Object — absolute minimal test
- */
 export class MCPBridge extends DurableObject {
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env)
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
 
-    // Health check
     if (url.pathname === "/health" || url.pathname.endsWith("/health")) {
       return Response.json({ status: "ok" })
     }
 
-    // WebSocket
     if (url.pathname === "/ws/extension" || url.pathname.endsWith("/ws/extension")) {
       const upgrade = request.headers.get("Upgrade")
       if (upgrade !== "websocket") {
@@ -23,11 +22,9 @@ export class MCPBridge extends DurableObject {
       const client = pair[0]
       const server = pair[1]
 
-      // Accept
       this.ctx.acceptWebSocket(server)
 
-      // Handler
-      server.addEventListener("message", (e) => {
+      server.addEventListener("message", (e: MessageEvent) => {
         server.send(`echo: ${e.data}`)
       })
 
@@ -41,11 +38,7 @@ export class MCPBridge extends DurableObject {
     ws.send(`echo: ${message}`)
   }
 
-  async webSocketClose(ws: WebSocket): Promise<void> {
-    // cleanup
-  }
+  async webSocketClose(): Promise<void> {}
 
-  async webSocketError(ws: WebSocket): Promise<void> {
-    // cleanup
-  }
+  async webSocketError(): Promise<void> {}
 }
