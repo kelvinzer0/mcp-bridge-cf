@@ -1,11 +1,13 @@
 /**
  * MCP Bridge — Cloudflare Worker entry point
  *
+ * Multi-room: setiap room = 1 Durable Object instance
+ *
  * Routes:
- *   /ws/extension  — WebSocket for browser extension
- *   /mcp           — Streamable HTTP for MCP clients
- *   /health        — Health check
- *   /              — Landing page with connection info
+ *   /ws/extension?room=<id>  — WebSocket for tool provider
+ *   /mcp?room=<id>           — Streamable HTTP for MCP client
+ *   /health                  — Health check
+ *   /new                     — Generate new room URL
  */
 
 export { MCPBridge } from "./bridge"
@@ -29,15 +31,28 @@ export default {
       })
     }
 
-    // Get or create the bridge Durable Object
-    // Using a single instance per worker (can be extended to per-user)
-    const id = env.MCP_BRIDGE.idFromName("global")
+    // Generate new room
+    if (url.pathname === "/new" || url.pathname.endsWith("/new")) {
+      const roomId = crypto.randomUUID().slice(0, 8)
+      const base = url.origin
+      return Response.json({
+        room: roomId,
+        extension_url: `${base}/ws/extension?room=${roomId}`,
+        mcp_url: `${base}/mcp?room=${roomId}`,
+        health_url: `${base}/health?room=${roomId}`,
+      })
+    }
+
+    // Get room from query or path
+    const room = url.searchParams.get("room") || extractRoomFromPath(url.pathname) || "default"
+
+    // Route to Durable Object
+    const id = env.MCP_BRIDGE.idFromName(room)
     const stub = env.MCP_BRIDGE.get(id)
 
-    // Forward request to Durable Object
     const response = await stub.fetch(request)
 
-    // Add CORS headers to response
+    // CORS headers
     const headers = new Headers(response.headers)
     headers.set("Access-Control-Allow-Origin", "*")
 
@@ -47,4 +62,10 @@ export default {
       headers,
     })
   },
+}
+
+function extractRoomFromPath(pathname: string): string | null {
+  // /room/<id>/... pattern
+  const match = pathname.match(/^\/room\/([^/]+)/)
+  return match ? match[1] : null
 }

@@ -55,8 +55,10 @@ export class MCPBridge extends DurableObject {
     }
 
     if (url.pathname === "/health" || url.pathname.endsWith("/health")) {
+      const room = url.searchParams.get("room") || "default"
       return Response.json({
         status: "ok",
+        room,
         extensionConnected: this.session.extensionConnected,
         toolsRegistered: this.session.tools.size,
         tools: Array.from(this.session.tools.keys()),
