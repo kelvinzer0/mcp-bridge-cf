@@ -1,0 +1,11 @@
+name = "mcp-bridge"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+
+[[durable_objects.bindings]]
+name = "MCP_BRIDGE"
+class_name = "MCPBridge"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["MCPBridge"]
