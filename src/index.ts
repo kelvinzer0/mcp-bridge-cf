@@ -103,37 +103,32 @@ export default {
         },
       })
 
-      const response = await stub.fetch(modifiedRequest)
+      // For tool calls, handle at Worker level (forward to WS)
+      if ((url.pathname === "/mcp" || url.pathname.endsWith("/mcp")) && request.method === "POST") {
+        let body: any
+        try { body = await request.clone().json() } catch {}
 
-      // For tool calls, forward to WS
-      if (url.pathname === "/mcp" || url.pathname.endsWith("/mcp")) {
-        if (request.method === "POST") {
-          let body: any
-          try { body = await request.clone().json() } catch {}
-
-          if (body?.method === "tools/call" && r.ws) {
-            const name = body.params?.name
-            const args = body.params?.arguments || {}
-            if (name && r.tools.has(name)) {
-              try {
-                const result = await new Promise((resolve, reject) => {
-                  const callId = crypto.randomUUID()
-                  const timer = setTimeout(() => { r.pendingCalls.delete(callId); reject(new Error(`Timeout: ${name}`)) }, 60000)
-                  r.pendingCalls.set(callId, { resolve, reject, timer })
-                  r.ws!.send(JSON.stringify({ type: "callTool", callId, name, params: args }))
-                })
-                return Response.json({ jsonrpc: "2.0", id: body.id, result }, { headers: { "Access-Control-Allow-Origin": "*" } })
-              } catch (err) {
-                return Response.json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true } }, { headers: { "Access-Control-Allow-Origin": "*" } })
-              }
+        if (body?.method === "tools/call" && r.ws) {
+          const name = body.params?.name
+          const args = body.params?.arguments || {}
+          if (name && r.tools.has(name)) {
+            try {
+              const result = await new Promise((resolve, reject) => {
+                const callId = crypto.randomUUID()
+                const timer = setTimeout(() => { r.pendingCalls.delete(callId); reject(new Error(`Timeout: ${name}`)) }, 60000)
+                r.pendingCalls.set(callId, { resolve, reject, timer })
+                r.ws!.send(JSON.stringify({ type: "callTool", callId, name, params: args }))
+              })
+              return Response.json({ jsonrpc: "2.0", id: body.id, result }, { headers: { "Access-Control-Allow-Origin": "*" } })
+            } catch (err) {
+              return Response.json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true } }, { headers: { "Access-Control-Allow-Origin": "*" } })
             }
           }
         }
       }
 
-      const headers = new Headers(response.headers)
-      headers.set("Access-Control-Allow-Origin", "*")
-      return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+      // Return DO response directly (don't rebuild — preserves status 101 if needed)
+      return response
     } catch (err) {
       return Response.json({ error: String(err) }, { status: 500 })
     }
