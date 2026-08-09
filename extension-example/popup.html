@@ -5,7 +5,7 @@
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      width: 320px;
+      width: 340px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       background: #1a1a2e;
       color: #e0e0e0;
@@ -54,23 +54,38 @@
       cursor: pointer;
       margin-bottom: 6px;
     }
-    #connectBtn {
+    .btn-primary {
       background: #00d4ff;
       color: #000;
       font-weight: 600;
     }
-    #connectBtn:hover { background: #00b8d9; }
-    #disconnectBtn {
+    .btn-primary:hover { background: #00b8d9; }
+    .btn-secondary {
       background: #333;
       color: #e0e0e0;
     }
-    #disconnectBtn:hover { background: #444; }
+    .btn-secondary:hover { background: #444; }
+    .btn-small {
+      width: auto;
+      padding: 4px 10px;
+      font-size: 11px;
+      display: inline-block;
+    }
+    .room-info {
+      margin-top: 12px;
+      padding: 8px 12px;
+      background: #16213e;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+    .room-info .label { color: #888; }
+    .room-info .value { color: #44ff44; font-family: monospace; }
     .tools {
       margin-top: 12px;
       padding: 8px 12px;
       background: #16213e;
       border-radius: 6px;
-      max-height: 200px;
+      max-height: 180px;
       overflow-y: auto;
     }
     .tools h2 {
@@ -81,7 +96,7 @@
       letter-spacing: 0.5px;
     }
     .tool-item {
-      padding: 4px 0;
+      padding: 3px 0;
       font-size: 12px;
       border-bottom: 1px solid #222;
     }
@@ -96,10 +111,8 @@
       word-break: break-all;
       color: #888;
     }
-    .mcp-url code {
-      color: #44ff44;
-      font-size: 11px;
-    }
+    .mcp-url code { color: #44ff44; font-size: 11px; }
+    .copy-btn { cursor: pointer; color: #00d4ff; }
   </style>
 </head>
 <body>
@@ -110,18 +123,26 @@
     <span id="statusText">Disconnected</span>
   </div>
 
-  <input type="text" id="urlInput" placeholder="https://mcp-bridge.your-subdomain.workers.dev" />
-  <button id="connectBtn">Connect</button>
-  <button id="disconnectBtn" style="display:none">Disconnect</button>
+  <input type="text" id="urlInput" placeholder="https://mcp-bridge.<subdomain>.workers.dev" />
+
+  <button id="newRoomBtn" class="btn-secondary">New Room</button>
+  <button id="connectBtn" class="btn-primary">Connect</button>
+  <button id="disconnectBtn" class="btn-secondary" style="display:none">Disconnect</button>
+
+  <div class="room-info" id="roomInfo" style="display:none">
+    <div><span class="label">Room: </span><span class="value" id="roomId">-</span></div>
+    <div><span class="label">Tools: </span><span class="value" id="toolCount">0</span></div>
+  </div>
 
   <div class="tools" id="toolsSection" style="display:none">
-    <h2>Registered Tools (<span id="toolCount">0</span>)</h2>
+    <h2>Registered Tools</h2>
     <div id="toolList"></div>
   </div>
 
   <div class="mcp-url" id="mcpUrl" style="display:none">
-    MCP endpoint:<br>
+    MCP endpoint (copy to client):<br>
     <code id="mcpEndpoint"></code>
+    <span class="copy-btn" id="copyBtn"> 📋</span>
   </div>
 
   <script src="popup.js"></script>

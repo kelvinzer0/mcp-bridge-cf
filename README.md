@@ -1,6 +1,6 @@
 # MCP Bridge — Dynamic Tool Gateway
 
-A generic bridge between **any MCP client** and **any tool provider** via Cloudflare Workers Durable Objects. Tool providers connect via WebSocket, MCP clients connect via Streamable HTTP. Tools are registered dynamically and discovered automatically.
+A generic bridge between **any MCP client** and **any tool provider** via Cloudflare Workers Durable Objects. Each room gets an isolated Durable Object instance. Tool providers connect via WebSocket, MCP clients connect via Streamable HTTP. Tools are registered dynamically and discovered automatically.
 
 ## How It Works
 
@@ -12,95 +12,71 @@ A generic bridge between **any MCP client** and **any tool provider** via Cloudf
 │                 │  tools       │  dynamic registry    │ tools/call  │   Cursor)    │
 │  execute        │─────────────→│  + bridge            │───────────→│              │
 │  tools          │←─────────────│  forward calls       │←───────────│  AI agent    │
-│                 │  callTool    │                      │             │  discovers   │
+│                 │  callTool    │                      │             │              │
 └─────────────────┘              └──────────────────────┘             └──────────────┘
 ```
 
-**Bridge** — stateless MCP proxy with dynamic tool registry (Cloudflare Durable Object)
-
-**Tool Provider** — anything that connects via WebSocket and registers tools (browser extension, desktop app, script, etc.)
-
-**MCP Client** — any standard MCP client (VS Code, Claude Desktop, Cursor, etc.)
-
 ## Quick Start
 
-### 1. Deploy the Bridge
+### 1. Deploy
 
 ```bash
-git clone <this-repo>
+git clone https://github.com/kelvinzer0/mcp-bridge-cf
 cd mcp-bridge-cf
 npm install
 npx wrangler login
 npm run deploy
 ```
 
-Output: `https://mcp-bridge.<your-subdomain>.workers.dev`
+### 2. Create a Room
 
-### 2. Connect a Tool Provider
+```bash
+curl https://mcp-bridge.<subdomain>.workers.dev/new
+```
 
-Any application can register tools via WebSocket:
+Response:
+```json
+{
+  "room": "ab1fe4c7",
+  "extension_url": "https://mcp-bridge.<subdomain>.workers.dev/ws/extension?room=ab1fe4c7",
+  "mcp_url": "https://mcp-bridge.<subdomain>.workers.dev/mcp?room=ab1fe4c7",
+  "health_url": "https://mcp-bridge.<subdomain>.workers.dev/health?room=ab1fe4c7"
+}
+```
+
+### 3. Connect Tool Provider
 
 ```javascript
-const ws = new WebSocket("wss://mcp-bridge.<subdomain>.workers.dev/ws/extension")
+const { extension_url } = await fetch("https://mcp-bridge.<subdomain>.workers.dev/new").then(r => r.json())
+const ws = new WebSocket(extension_url)
 
 // Register tools
 ws.send(JSON.stringify({
   type: "registerTools",
-  tools: [
-    {
-      name: "my_tool",
-      description: "Does something useful",
-      inputSchema: {
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Input query" }
-        },
-        required: ["query"]
-      }
-    }
-  ]
+  tools: [{ name: "my_tool", description: "...", inputSchema: { ... } }]
 }))
 
-// Handle tool calls from MCP client
+// Handle tool calls
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data)
   if (msg.type === "callTool") {
-    // Execute the tool
-    const result = executeMyTool(msg.name, msg.params)
-
-    // Send result back
-    ws.send(JSON.stringify({
-      type: "toolResult",
-      callId: msg.callId,
-      result: {
-        content: [{ type: "text", text: JSON.stringify(result) }]
-      }
-    }))
+    const result = executeTool(msg.name, msg.params)
+    ws.send(JSON.stringify({ type: "toolResult", callId: msg.callId, result }))
   }
 }
 ```
 
-### 3. Connect an MCP Client
+### 4. Connect MCP Client
 
-**VS Code** (`.vscode/settings.json`):
+Use the `mcp_url` from step 2:
+
 ```json
 {
   "mcp": {
     "servers": {
       "bridge": {
-        "url": "https://mcp-bridge.<subdomain>.workers.dev/mcp"
+        "url": "https://mcp-bridge.<subdomain>.workers.dev/mcp?room=ab1fe4c7"
       }
-    }
-  }
-}
-```
-
-**Claude Desktop** (`claude_desktop_config.json`):
-```json
-{
-  "mcpServers": {
-    "bridge": {
-      "url": "https://mcp-bridge.<subdomain>.workers.dev/mcp"
     }
   }
 }
@@ -110,85 +86,42 @@ ws.onmessage = (event) => {
 
 ### Tool Provider → Bridge (WebSocket)
 
-**Register tools:**
-```json
-{
-  "type": "registerTools",
-  "tools": [
-    {
-      "name": "tool_name",
-      "description": "What it does",
-      "inputSchema": { "type": "object", "properties": { ... } }
-    }
-  ]
-}
-```
-
-**Unregister tools:**
-```json
-{
-  "type": "unregisterTools",
-  "names": ["tool_name"]
-}
-```
-
-**Respond to tool call:**
-```json
-{
-  "type": "toolResult",
-  "callId": "uuid-from-bridge",
-  "result": {
-    "content": [{ "type": "text", "text": "result data" }],
-    "isError": false
-  }
-}
-```
+| Message | Description |
+|---------|-------------|
+| `{ type: "registerTools", tools: [...] }` | Register tools |
+| `{ type: "unregisterTools", names: [...] }` | Unregister tools |
+| `{ type: "toolResult", callId, result }` | Return tool result |
+| `{ type: "pong" }` | Ping response |
 
 ### Bridge → Tool Provider (WebSocket)
 
-**Execute tool:**
-```json
-{
-  "type": "callTool",
-  "callId": "unique-id",
-  "name": "tool_name",
-  "params": { "query": "value" }
-}
-```
-
-**Ping:**
-```json
-{ "type": "ping" }
-```
+| Message | Description |
+|---------|-------------|
+| `{ type: "callTool", callId, name, params }` | Execute tool |
+| `{ type: "ping" }` | Keepalive |
 
 ### MCP Client → Bridge (Streamable HTTP)
 
-Standard MCP protocol on `/mcp` endpoint:
-- `POST /mcp` — JSON-RPC requests (initialize, tools/list, tools/call)
-- `GET /mcp` — SSE stream for server-initiated messages
+Standard MCP protocol on `/mcp?room=<id>`:
+- `POST /mcp?room=<id>` — JSON-RPC (initialize, tools/list, tools/call)
+- `GET /mcp?room=<id>` — SSE stream
 
 ## Endpoints
 
 | Endpoint | Protocol | Description |
 |----------|----------|-------------|
-| `/ws/extension` | WebSocket | Tool provider connects here |
-| `/mcp` | Streamable HTTP | MCP client connects here |
-| `/health` | HTTP GET | Status + registered tools |
+| `/new` | HTTP GET | Generate new room |
+| `/ws/extension?room=<id>` | WebSocket | Tool provider connects here |
+| `/mcp?room=<id>` | Streamable HTTP | MCP client connects here |
+| `/health?room=<id>` | HTTP GET | Room status + tool list |
 
 ## Example: Browser Extension
 
 See [`extension-example/`](./extension-example/) for a Chrome extension that:
+- Connects to a room via WebSocket
 - Detects page context (GitHub, Gmail, Notion, etc.)
 - Registers context-specific tools dynamically
 - Executes tools in the page DOM
-- Auto-upplements tools when navigating
-
-This is just one example — you can build tool providers for anything:
-- Desktop apps (Electron, Tauri)
-- CLI tools
-- Mobile apps
-- IoT devices
-- Other APIs
 
 ## Development
 
@@ -199,15 +132,13 @@ npm run typecheck
 
 ## Security
 
-For production use, add authentication:
-
+For production use, add OAuth:
 ```typescript
 import OAuthProvider from "@cloudflare/workers-oauth-provider"
 
 export default new OAuthProvider({
   apiRoute: "/mcp",
-  apiHandler: createMcpHandler(createServer),
-  // ... OAuth config
+  apiHandler: ...,
 })
 ```
 
