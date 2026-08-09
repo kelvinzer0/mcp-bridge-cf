@@ -68,13 +68,60 @@ ws.onmessage = (event) => {
 
 ### 4. Connect MCP Client
 
-Use the `mcp_url` from step 2:
+Use the `mcp_url` from step 2. Setup per client:
 
+**OpenCode** (`opencode.json`):
 ```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "browser-bridge": {
+      "type": "remote",
+      "url": "https://mcp-bridge.<subdomain>.workers.dev/mcp?room=ab1fe4c7",
+      "enabled": true
+    }
+  }
+}
+```
+
+**Claude Desktop** — Settings → Connectors → Add remote server URL:
+```
+https://mcp-bridge.<subdomain>.workers.dev/mcp?room=ab1fe4c7
+```
+Or `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "browser-bridge": {
+      "command": "npx",
+      "args": ["mcp-remote", "https://mcp-bridge.<subdomain>.workers.dev/mcp?room=ab1fe4c7"]
+    }
+  }
+}
+```
+
+**Cursor** (`~/.cursor/mcp.json`):
+```json
+{
+  "mcpServers": {
+    "browser-bridge": {
+      "url": "https://mcp-bridge.<subdomain>.workers.dev/mcp?room=ab1fe4c7"
+    }
+  }
+}
+```
+
+**OpenClaw**:
+```bash
+openclaw mcp add browser-bridge --url "https://mcp-bridge.<subdomain>.workers.dev/mcp?room=ab1fe4c7"
+```
+Or `openclaw.json`:
+```json5
 {
   "mcp": {
     "servers": {
-      "bridge": {
+      "browser-bridge": {
+        "transport": "sse",
         "url": "https://mcp-bridge.<subdomain>.workers.dev/mcp?room=ab1fe4c7"
       }
     }
