@@ -23,10 +23,6 @@ export interface ToolResultMessage {
   result: ToolResult
 }
 
-export interface PingMessage {
-  type: "ping"
-}
-
 export interface PongMessage {
   type: "pong"
 }
@@ -37,9 +33,7 @@ export type ExtensionMessage =
   | ToolResultMessage
   | PongMessage
 
-export type WorkerMessage =
-  | CallToolMessage
-  | PingMessage
+export type WorkerMessage = CallToolMessage
 
 // === Tool Definition ===
 
@@ -78,7 +72,7 @@ export interface JsonRpcNotification {
 
 export interface JsonRpcResponse {
   jsonrpc: "2.0"
-  id: number | string
+  id: number | string | null
   result?: unknown
   error?: JsonRpcError
 }
@@ -87,13 +81,4 @@ export interface JsonRpcError {
   code: number
   message: string
   data?: unknown
-}
-
-// === Session State ===
-
-export interface SessionState {
-  tools: Map<string, ToolDefinition>
-  extensionConnected: boolean
-  initialized: boolean
-  clientInfo?: { name: string; version: string }
 }
