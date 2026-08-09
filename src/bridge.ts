@@ -59,8 +59,9 @@ export class MCPBridge extends DurableObject {
       }
 
       // Create WebSocket pair
-      const pair = new WebSocketPair()
-      const [client, server] = Object.values(pair)
+      const webSocketPair = new WebSocketPair()
+      const client = webSocketPair[0]
+      const server = webSocketPair[1]
 
       // Accept via Hibernation API
       this.ctx.acceptWebSocket(server)
