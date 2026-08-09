@@ -29,6 +29,7 @@ interface PendingCall {
 
 /**
  * MCP Bridge Durable Object
+ * Uses Hibernation WebSocket API per Cloudflare docs.
  */
 export class MCPBridge extends DurableObject {
   private session: StoredSession = {
@@ -41,10 +42,16 @@ export class MCPBridge extends DurableObject {
   private pendingCalls: Map<string, PendingCall> = new Map()
   private sseWriters: Map<string, WritableStreamDefaultWriter> = new Map()
 
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env)
+    // Restore state after hibernation
+    this.session.extensionConnected = false
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
 
-    // WebSocket upgrade for extension
+    // WebSocket upgrade
     if (url.pathname === "/ws/extension" || url.pathname.endsWith("/ws/extension")) {
       const upgradeHeader = request.headers.get("Upgrade")
       if (!upgradeHeader || upgradeHeader !== "websocket") {
@@ -52,23 +59,28 @@ export class MCPBridge extends DurableObject {
       }
 
       // Create WebSocket pair
-      const webSocketPair = new WebSocketPair()
-      const [client, server] = [webSocketPair[0], webSocketPair[1]]
+      const pair = new WebSocketPair()
+      const [client, server] = Object.values(pair)
 
-      // Accept the server side
-      this.handleWebSocketConnection(server)
+      // Accept via Hibernation API
+      this.ctx.acceptWebSocket(server)
 
-      // Return the client side
+      // Track connection
+      this.extensionWs = server
+      this.session.extensionConnected = true
+
       return new Response(null, {
         status: 101,
         webSocket: client,
       })
     }
 
+    // MCP endpoint
     if (url.pathname === "/mcp" || url.pathname.endsWith("/mcp")) {
       return this.handleMcp(request)
     }
 
+    // Health check
     if (url.pathname === "/health" || url.pathname.endsWith("/health")) {
       const room = url.searchParams.get("room") || "default"
       return Response.json({
@@ -84,44 +96,30 @@ export class MCPBridge extends DurableObject {
   }
 
   // ============================================================
-  //  WEBSOCKET HANDLING
+  //  HIBERNATION WEBSOCKET CALLBACKS
   // ============================================================
 
-  private handleWebSocketConnection(ws: WebSocket) {
-    // Accept the WebSocket using legacy API
-    ws.accept()
-
-    // Clean up previous connection
-    if (this.extensionWs) {
-      try {
-        this.extensionWs.close(4000, "Replaced")
-      } catch {
-        // ignore
-      }
+  async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
+    try {
+      const text = typeof message === "string" ? message : new TextDecoder().decode(message)
+      const msg = JSON.parse(text) as ExtensionMessage
+      this.onExtensionMessage(msg)
+    } catch (err) {
+      console.error("Bad message:", err)
     }
+  }
 
-    this.extensionWs = ws
-    this.session.extensionConnected = true
+  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+    this.extensionWs = null
+    this.session.extensionConnected = false
+    this.clearDynamicTools()
+    this.rejectAllPending("Extension disconnected")
+  }
 
-    ws.addEventListener("message", (event: MessageEvent) => {
-      try {
-        const msg = JSON.parse(event.data as string) as ExtensionMessage
-        this.onExtensionMessage(msg)
-      } catch (err) {
-        console.error("Bad extension message:", err)
-      }
-    })
-
-    ws.addEventListener("close", () => {
-      this.extensionWs = null
-      this.session.extensionConnected = false
-      this.clearDynamicTools()
-      this.rejectAllPending("Extension disconnected")
-    })
-
-    ws.addEventListener("error", (event) => {
-      console.error("WebSocket error:", event)
-    })
+  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+    console.error("WebSocket error:", error)
+    this.extensionWs = null
+    this.session.extensionConnected = false
   }
 
   // ============================================================
@@ -166,11 +164,9 @@ export class MCPBridge extends DurableObject {
     if (request.method === "GET") {
       return this.openSseStream()
     }
-
     if (request.method === "POST") {
       return this.handleJsonRpc(request)
     }
-
     return new Response("Method Not Allowed", { status: 405 })
   }
 
@@ -197,18 +193,13 @@ export class MCPBridge extends DurableObject {
         const reader = readable.getReader()
         const pump = (): Promise<void> =>
           reader.read().then(({ done, value }) => {
-            if (done) {
-              controller.close()
-              return
-            }
+            if (done) { controller.close(); return }
             controller.enqueue(value)
             return pump()
           })
         pump().catch(() => controller.close())
       },
-      cancel() {
-        cleanup()
-      },
+      cancel() { cleanup() },
     })
 
     return new Response(responseStream, {
@@ -229,7 +220,7 @@ export class MCPBridge extends DurableObject {
       body = (await request.json()) as JsonRpcRequest
     } catch {
       return Response.json(
-        { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } } satisfies JsonRpcResponse,
+        { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } },
         { status: 400 }
       )
     }
@@ -251,14 +242,12 @@ export class MCPBridge extends DurableObject {
   private streamResponse(response: JsonRpcResponse): Response {
     const encoder = new TextEncoder()
     const data = `event: message\ndata: ${JSON.stringify(response)}\n\n`
-
     const stream = new ReadableStream({
       start(controller) {
         controller.enqueue(encoder.encode(data))
         controller.close()
       },
     })
-
     return new Response(stream, {
       headers: {
         "Content-Type": "text/event-stream",
@@ -274,35 +263,23 @@ export class MCPBridge extends DurableObject {
 
   private handleRequest(req: JsonRpcRequest): JsonRpcResponse | Promise<JsonRpcResponse> {
     switch (req.method) {
-      case "initialize":
-        return this.handleInitialize(req)
-      case "tools/list":
-        return this.handleToolsList(req)
-      case "tools/call":
-        return this.handleToolsCall(req)
-      case "ping":
-        return { jsonrpc: "2.0", id: req.id, result: {} }
+      case "initialize": return this.handleInitialize(req)
+      case "tools/list": return this.handleToolsList(req)
+      case "tools/call": return this.handleToolsCall(req)
+      case "ping": return { jsonrpc: "2.0", id: req.id, result: {} }
       default:
-        return {
-          jsonrpc: "2.0",
-          id: req.id,
-          error: { code: -32601, message: `Method not found: ${req.method}` },
-        }
+        return { jsonrpc: "2.0", id: req.id, error: { code: -32601, message: `Method not found: ${req.method}` } }
     }
   }
 
   private handleNotification(notif: JsonRpcNotification) {
-    if (notif.method === "notifications/initialized") {
-      this.session.initialized = true
-    }
+    if (notif.method === "notifications/initialized") this.session.initialized = true
   }
 
   private handleInitialize(req: JsonRpcRequest): JsonRpcResponse {
     this.session.clientInfo = req.params?.clientInfo as { name: string; version: string }
-
     return {
-      jsonrpc: "2.0",
-      id: req.id,
+      jsonrpc: "2.0", id: req.id,
       result: {
         protocolVersion: "2025-03-26",
         capabilities: { tools: { listChanged: true } },
@@ -317,7 +294,6 @@ export class MCPBridge extends DurableObject {
       description: t.description || "",
       inputSchema: t.inputSchema || { type: "object", properties: {} },
     }))
-
     return { jsonrpc: "2.0", id: req.id, result: { tools } }
   }
 
@@ -327,21 +303,13 @@ export class MCPBridge extends DurableObject {
     const args = params?.arguments || {}
 
     if (!name || !this.session.tools.has(name)) {
-      return {
-        jsonrpc: "2.0",
-        id: req.id,
-        error: { code: -32602, message: `Unknown tool: ${name}` },
-      }
+      return { jsonrpc: "2.0", id: req.id, error: { code: -32602, message: `Unknown tool: ${name}` } }
     }
 
     if (!this.extensionWs) {
       return {
-        jsonrpc: "2.0",
-        id: req.id,
-        result: {
-          content: [{ type: "text", text: "Error: Tool provider not connected" }],
-          isError: true,
-        },
+        jsonrpc: "2.0", id: req.id,
+        result: { content: [{ type: "text", text: "Error: Tool provider not connected" }], isError: true },
       }
     }
 
@@ -350,12 +318,8 @@ export class MCPBridge extends DurableObject {
       return { jsonrpc: "2.0", id: req.id, result }
     } catch (err) {
       return {
-        jsonrpc: "2.0",
-        id: req.id,
-        result: {
-          content: [{ type: "text", text: `Error: ${(err as Error).message}` }],
-          isError: true,
-        },
+        jsonrpc: "2.0", id: req.id,
+        result: { content: [{ type: "text", text: `Error: ${(err as Error).message}` }], isError: true },
       }
     }
   }
@@ -367,7 +331,6 @@ export class MCPBridge extends DurableObject {
   private callExtensionTool(name: string, params: Record<string, unknown>): Promise<ToolResult> {
     return new Promise((resolve, reject) => {
       const callId = crypto.randomUUID()
-
       const timer = setTimeout(() => {
         this.pendingCalls.delete(callId)
         reject(new Error(`Tool call timeout: ${name}`))
@@ -406,10 +369,8 @@ export class MCPBridge extends DurableObject {
       jsonrpc: "2.0",
       method: "notifications/tools/list_changed",
     }
-
     const encoder = new TextEncoder()
     const data = encoder.encode(`event: message\ndata: ${JSON.stringify(notification)}\n\n`)
-
     for (const writer of this.sseWriters.values()) {
       writer.write(data).catch(() => {})
     }
