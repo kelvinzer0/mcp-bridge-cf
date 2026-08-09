@@ -29,8 +29,6 @@ interface PendingCall {
 
 /**
  * MCP Bridge Durable Object
- *
- * Uses WebSocket Hibernation API for persistent connections.
  */
 export class MCPBridge extends DurableObject {
   private session: StoredSession = {
@@ -48,24 +46,23 @@ export class MCPBridge extends DurableObject {
 
     // WebSocket upgrade for extension
     if (url.pathname === "/ws/extension" || url.pathname.endsWith("/ws/extension")) {
-      const upgrade = request.headers.get("Upgrade")
-      if (upgrade !== "websocket") {
-        return new Response("Expected WebSocket upgrade", { status: 426 })
+      const upgradeHeader = request.headers.get("Upgrade")
+      if (!upgradeHeader || upgradeHeader !== "websocket") {
+        return new Response("Expected websocket", { status: 426 })
       }
 
-      // Use Hibernation API - acceptWebSocket handles the upgrade
-      const pair = new WebSocketPair()
-      const [client, server] = [pair[0], pair[1]]
+      // Create WebSocket pair
+      const webSocketPair = new WebSocketPair()
+      const [client, server] = [webSocketPair[0], webSocketPair[1]]
 
-      // Accept the WebSocket (this is the hibernation API)
-      this.ctx.acceptWebSocket(server)
+      // Accept the server side
+      this.handleWebSocketConnection(server)
 
-      // Store reference
-      this.extensionWs = server
-      this.session.extensionConnected = true
-
-      // Return client side with 101 status
-      return new Response(null, { status: 101, webSocket: client })
+      // Return the client side
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      })
     }
 
     if (url.pathname === "/mcp" || url.pathname.endsWith("/mcp")) {
@@ -87,30 +84,44 @@ export class MCPBridge extends DurableObject {
   }
 
   // ============================================================
-  //  WEBSOCKET HANDLERS (Hibernation API callbacks)
+  //  WEBSOCKET HANDLING
   // ============================================================
 
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    try {
-      const text = typeof message === "string" ? message : new TextDecoder().decode(message)
-      const msg = JSON.parse(text) as ExtensionMessage
-      this.onExtensionMessage(msg)
-    } catch (err) {
-      console.error("Bad extension message:", err)
+  private handleWebSocketConnection(ws: WebSocket) {
+    // Accept the WebSocket using legacy API
+    ws.accept()
+
+    // Clean up previous connection
+    if (this.extensionWs) {
+      try {
+        this.extensionWs.close(4000, "Replaced")
+      } catch {
+        // ignore
+      }
     }
-  }
 
-  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
-    this.extensionWs = null
-    this.session.extensionConnected = false
-    this.clearDynamicTools()
-    this.rejectAllPending("Extension disconnected")
-  }
+    this.extensionWs = ws
+    this.session.extensionConnected = true
 
-  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
-    console.error("WebSocket error:", error)
-    this.extensionWs = null
-    this.session.extensionConnected = false
+    ws.addEventListener("message", (event: MessageEvent) => {
+      try {
+        const msg = JSON.parse(event.data as string) as ExtensionMessage
+        this.onExtensionMessage(msg)
+      } catch (err) {
+        console.error("Bad extension message:", err)
+      }
+    })
+
+    ws.addEventListener("close", () => {
+      this.extensionWs = null
+      this.session.extensionConnected = false
+      this.clearDynamicTools()
+      this.rejectAllPending("Extension disconnected")
+    })
+
+    ws.addEventListener("error", (event) => {
+      console.error("WebSocket error:", event)
+    })
   }
 
   // ============================================================
