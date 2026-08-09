@@ -13,10 +13,14 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          cache: "npm"
+          node-version: "22"
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm install
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+        continue-on-error: true
 
       - name: Deploy
         uses: cloudflare/wrangler-action@v3
