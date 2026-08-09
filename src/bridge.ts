@@ -81,11 +81,17 @@ export class MCPBridge extends DurableObject {
     const { readable, writable } = new TransformStream<Uint8Array>()
     const w = writable.getWriter()
     const e = new TextEncoder()
+
+    // Send the required MCP-over-SSE 'endpoint' event immediately on connect.
+    // MCP clients wait for this before they start sending POST requests.
+    w.write(e.encode(`event: endpoint\ndata: /mcp\n\n`)).catch(() => {})
+
+    // Heartbeat every 30s to keep the connection alive through proxies/CF
     const hb = setInterval(() => w.write(e.encode(":\n\n")).catch(() => clearInterval(hb)), 30000)
     return new Response(new ReadableStream({
       start(c) { const r = readable.getReader(); const p = (): Promise<void> => r.read().then(({ done, value }) => { if (done) { c.close(); return } c.enqueue(value); return p() }); p().catch(() => c.close()) },
       cancel() { clearInterval(hb); w.close().catch(() => {}) },
-    }), { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" } })
+    }), { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*", "X-Accel-Buffering": "no" } })
   }
 
   private async rpc(request: Request): Promise<Response> {
