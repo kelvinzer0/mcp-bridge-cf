@@ -29,7 +29,6 @@ interface PendingCall {
 
 /**
  * MCP Bridge Durable Object
- * Uses Hibernation WebSocket API per Cloudflare docs.
  */
 export class MCPBridge extends DurableObject {
   private session: StoredSession = {
@@ -42,12 +41,6 @@ export class MCPBridge extends DurableObject {
   private pendingCalls: Map<string, PendingCall> = new Map()
   private sseWriters: Map<string, WritableStreamDefaultWriter> = new Map()
 
-  constructor(ctx: DurableObjectState, env: unknown) {
-    super(ctx, env)
-    // Restore state after hibernation
-    this.session.extensionConnected = false
-  }
-
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
 
@@ -59,17 +52,43 @@ export class MCPBridge extends DurableObject {
       }
 
       // Create WebSocket pair
-      const webSocketPair = new WebSocketPair()
-      const client = webSocketPair[0]
-      const server = webSocketPair[1]
+      const pair = new WebSocketPair()
+      const client = pair[0]
+      const server = pair[1]
 
-      // Accept via Hibernation API
-      this.ctx.acceptWebSocket(server)
+      // Accept the server side
+      server.accept()
 
-      // Track connection
+      // Clean up previous connection
+      if (this.extensionWs) {
+        try { this.extensionWs.close(4000, "Replaced") } catch {}
+      }
+
       this.extensionWs = server
       this.session.extensionConnected = true
 
+      // Set up event handlers
+      server.addEventListener("message", (event: MessageEvent) => {
+        try {
+          const msg = JSON.parse(event.data as string) as ExtensionMessage
+          this.onExtensionMessage(msg)
+        } catch (err) {
+          console.error("Bad message:", err)
+        }
+      })
+
+      server.addEventListener("close", () => {
+        this.extensionWs = null
+        this.session.extensionConnected = false
+        this.clearDynamicTools()
+        this.rejectAllPending("Extension disconnected")
+      })
+
+      server.addEventListener("error", (event) => {
+        console.error("WebSocket error:", event)
+      })
+
+      // Return client side
       return new Response(null, {
         status: 101,
         webSocket: client,
@@ -94,33 +113,6 @@ export class MCPBridge extends DurableObject {
     }
 
     return new Response("Not Found", { status: 404 })
-  }
-
-  // ============================================================
-  //  HIBERNATION WEBSOCKET CALLBACKS
-  // ============================================================
-
-  async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
-    try {
-      const text = typeof message === "string" ? message : new TextDecoder().decode(message)
-      const msg = JSON.parse(text) as ExtensionMessage
-      this.onExtensionMessage(msg)
-    } catch (err) {
-      console.error("Bad message:", err)
-    }
-  }
-
-  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
-    this.extensionWs = null
-    this.session.extensionConnected = false
-    this.clearDynamicTools()
-    this.rejectAllPending("Extension disconnected")
-  }
-
-  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
-    console.error("WebSocket error:", error)
-    this.extensionWs = null
-    this.session.extensionConnected = false
   }
 
   // ============================================================
