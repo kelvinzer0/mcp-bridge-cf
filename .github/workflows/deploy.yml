@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,9 +18,27 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Typecheck
+      - name: Lint
         run: npx tsc --noEmit
-        continue-on-error: true
+
+      - name: Build
+        run: npx wrangler deploy --dry-run --outdir=dist
+
+      - name: Test
+        run: echo "No tests yet"
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
 
       - name: Deploy
         uses: cloudflare/wrangler-action@v3
