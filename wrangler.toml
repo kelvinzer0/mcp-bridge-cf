@@ -8,4 +8,4 @@ class_name = "MCPBridge"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["MCPBridge"]
+new_sqlite_classes = ["MCPBridge"]
